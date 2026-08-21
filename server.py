@@ -1,16 +1,19 @@
 import json
 import asyncio
 import logging
+import os
 import socket
 import struct
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional, Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-SERVERS_FILE = "servers.json"
+BASE_DIR = Path(__file__).resolve().parent
+SERVERS_FILE = BASE_DIR / "servers.json"
 CACHE_TTL = 15
 ENABLE_UDP_QUERIES = True
 
@@ -94,16 +97,15 @@ def _set_cache(key: str, val: Any):
     _cache_ts[key] = datetime.now()
 
 def _build_query(ip: str, port: int, opcode: bytes, challenge: Optional[int] = None) -> bytes:
-    """Собирает UDP пакет для SA-MP query."""
     ip_bytes = socket.inet_aton(ip)
-    port_bytes = struct.pack(">H", port)
+    port_bytes = struct.pack("<H", port)
     packet = b"SAMP" + ip_bytes + port_bytes + opcode
     if challenge is not None:
         packet += struct.pack("<I", challenge)
     return packet
 
 def _parse_info_response(data: bytes) -> dict:
-    pos = 11  # SAMP(4) + IP(4) + port(2) + opcode(1)
+    pos = 11
     if len(data) < pos + 5:
         raise ValueError("Слишком короткий ответ от сервера")
 
@@ -151,10 +153,8 @@ def _parse_players_response(data: bytes) -> list:
     for _ in range(player_count):
         if pos + 1 > len(data):
             break
-        # player_id = data[pos]  # не используем
         pos += 1
 
-        # null-terminated string
         name_end = data.find(b"\x00", pos)
         if name_end == -1 or name_end == pos:
             break
@@ -164,7 +164,6 @@ def _parse_players_response(data: bytes) -> list:
         if pos + 8 > len(data):
             break
         score = struct.unpack("<I", data[pos:pos+4])[0]
-        # ping = struct.unpack("<I", data[pos+4:pos+8])[0]  # не используем
         pos += 8
 
         players.append({"name": name, "score": score})
@@ -217,7 +216,7 @@ async def query_server(server_cfg: dict) -> ServerStatus:
         )
 
     try:
-        raw_info = await _query_udp(ip, port, b"i", timeout=20.0)
+        raw_info = await _query_udp(ip, port, b"i", timeout=5.0)
         info = _parse_info_response(raw_info)
     except socket.timeout:
         return ServerStatus(
@@ -263,7 +262,6 @@ async def query_server(server_cfg: dict) -> ServerStatus:
 
     player_list = []
     try:
-        # Пробуем с key если он есть, иначе без challenge
         challenge = key if key is not None else None
         raw_players = await _query_udp(ip, port, b"c", challenge=challenge, timeout=4.0)
         player_list = _parse_players_response(raw_players)
@@ -416,6 +414,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
-        port=8000,
+        port=int(os.getenv("PORT", "8000")),
         log_level="info",
     )
