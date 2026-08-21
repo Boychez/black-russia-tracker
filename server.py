@@ -261,7 +261,7 @@ async def query_server(server_cfg: dict) -> ServerStatus:
 
     # Шаг 1: получаем базовую информацию о сервере (без challenge)
     try:
-        raw_info = await _query_udp(ip, port, b"i", timeout=30.0)
+        raw_info = await _query_udp(ip, port, b"i", timeout=10.0)
         info = _parse_info_response(raw_info)
     except socket.timeout:
         return ServerStatus(
