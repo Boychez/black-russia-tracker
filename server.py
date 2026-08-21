@@ -16,6 +16,8 @@ BASE_DIR = Path(__file__).resolve().parent
 SERVERS_FILE = BASE_DIR / "servers.json"
 CACHE_TTL = 15
 ENABLE_UDP_QUERIES = True
+UDP_INFO_TIMEOUT = 10.0
+UDP_RETRIES = 3
 
 app = FastAPI(
     title="Black Russia API",
@@ -174,21 +176,21 @@ async def _query_udp(ip: str, port: int, opcode: bytes, challenge: Optional[int]
     loop = asyncio.get_event_loop()
 
     def _sync():
-        sock = None
-        try:
+        packet = _build_query(ip, port, opcode, challenge)
+        for attempt in range(UDP_RETRIES):
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(timeout)
-            packet = _build_query(ip, port, opcode, challenge)
-            sock.sendto(packet, (ip, port))
-            data, _ = sock.recvfrom(4096)
-            return data
-        except PermissionError as e:
-            logger.error(f"Permission denied при запросе к {ip}:{port} - возможно ограничение на сервере")
-            raise OSError(f"Permission denied: {e}")
-        except Exception as e:
-            raise
-        finally:
-            if sock:
+            try:
+                sock.settimeout(timeout)
+                sock.sendto(packet, (ip, port))
+                data, _ = sock.recvfrom(4096)
+                return data
+            except socket.timeout:
+                if attempt + 1 == UDP_RETRIES:
+                    raise
+            except PermissionError as e:
+                logger.error(f"Permission denied при запросе к {ip}:{port} - возможно ограничение на сервере")
+                raise OSError(f"Permission denied: {e}")
+            finally:
                 sock.close()
 
     return await loop.run_in_executor(None, _sync)
@@ -216,7 +218,7 @@ async def query_server(server_cfg: dict) -> ServerStatus:
         )
 
     try:
-        raw_info = await _query_udp(ip, port, b"i", timeout=5.0)
+        raw_info = await _query_udp(ip, port, b"i", timeout=UDP_INFO_TIMEOUT)
         info = _parse_info_response(raw_info)
     except socket.timeout:
         return ServerStatus(
