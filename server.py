@@ -11,12 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 SERVERS_FILE = "servers.json"
-CACHE_TTL = 15  # секунд
-ENABLE_UDP_QUERIES = True  # Отключить UDP запросы если хостер их блокирует
+CACHE_TTL = 15
+ENABLE_UDP_QUERIES = True
 
 app = FastAPI(
-    title="Black Russia CRMP Test Servers Tracker",
-    description="API для отслеживания онлайна на тестовых (PreProd/ST) серверах Black Russia CRMP",
+    title="Black Russia API",
+    description="API",
     version="1.2.0",
 )
 
@@ -29,10 +29,6 @@ app.add_middleware(
 )
 
 logger = logging.getLogger("br_tracker")
-
-# ============================================================
-# Модели
-# ============================================================
 
 class ServerConfig(BaseModel):
     logo: str = ""
@@ -81,10 +77,6 @@ class GameServerResponse(BaseModel):
     x2: bool
     online: int
 
-# ============================================================
-# Кэш
-# ============================================================
-
 _cache = {}
 _cache_ts = {}
 
@@ -101,15 +93,6 @@ def _set_cache(key: str, val: Any):
     _cache[key] = val
     _cache_ts[key] = datetime.now()
 
-# ============================================================
-# SA-MP Query Protocol — чистая реализация на UDP
-# ============================================================
-# Формат пакета:
-#   "SAMP" (4 байта) + IP_bytes (4) + port_bytes (2) + opcode (1) + [challenge (4)]
-# Opcode 'i' = информация о сервере
-# Opcode 'c' = список игроков (требует challenge)
-# ============================================================
-
 def _build_query(ip: str, port: int, opcode: bytes, challenge: Optional[int] = None) -> bytes:
     """Собирает UDP пакет для SA-MP query."""
     ip_bytes = socket.inet_aton(ip)
@@ -120,19 +103,6 @@ def _build_query(ip: str, port: int, opcode: bytes, challenge: Optional[int] = N
     return packet
 
 def _parse_info_response(data: bytes) -> dict:
-    """
-    Парсит ответ на 'i' запрос (серверная информация).
-    Формат (после 11-байтного заголовка SAMP+IP+port+opcode):
-      - passworded: 1 байт
-      - players: 2 байта (little-endian)
-      - max_players: 2 байта
-      - hostname_len: 4 байта
-      - hostname: hostname_len байт
-      - gamemode_len: 4 байта
-      - gamemode: gamemode_len байт
-      - language_len: 4 байта
-      - language: language_len байт
-    """
     pos = 11  # SAMP(4) + IP(4) + port(2) + opcode(1)
     if len(data) < pos + 5:
         raise ValueError("Слишком короткий ответ от сервера")
@@ -170,16 +140,6 @@ def _parse_info_response(data: bytes) -> dict:
     }
 
 def _parse_players_response(data: bytes) -> list:
-    """
-    Парсит ответ на 'c' запрос (список игроков).
-    Формат (после 11-байтного заголовка):
-      - player_count: 2 байта
-      - для каждого игрока:
-          - player_id: 1 байт
-          - name: null-terminated string
-          - score: 4 байта (little-endian)
-          - ping: 4 байта (little-endian)
-    """
     pos = 11
     if len(data) < pos + 2:
         return []
@@ -212,7 +172,6 @@ def _parse_players_response(data: bytes) -> list:
     return players
 
 async def _query_udp(ip: str, port: int, opcode: bytes, challenge: Optional[int] = None, timeout: float = 5.0) -> bytes:
-    """Отправляет UDP запрос и получает ответ от сервера."""
     loop = asyncio.get_event_loop()
 
     def _sync():
@@ -236,13 +195,11 @@ async def _query_udp(ip: str, port: int, opcode: bytes, challenge: Optional[int]
     return await loop.run_in_executor(None, _sync)
 
 async def query_server(server_cfg: dict) -> ServerStatus:
-    """Опрашивает один CRMP сервер и возвращает полный статус."""
     ip = server_cfg["ip"]
     port = server_cfg["port"]
     key = server_cfg.get("key")
     now = datetime.now().isoformat()
 
-    # Если UDP запросы отключены, используем данные из конфига
     if not ENABLE_UDP_QUERIES:
         return ServerStatus(
             config=ServerConfig(**server_cfg),
@@ -259,9 +216,8 @@ async def query_server(server_cfg: dict) -> ServerStatus:
             error=None,
         )
 
-    # Шаг 1: получаем базовую информацию о сервере (без challenge)
     try:
-        raw_info = await _query_udp(ip, port, b"i", timeout=15.0)
+        raw_info = await _query_udp(ip, port, b"i", timeout=20.0)
         info = _parse_info_response(raw_info)
     except socket.timeout:
         return ServerStatus(
@@ -305,7 +261,6 @@ async def query_server(server_cfg: dict) -> ServerStatus:
             player_list=[], error=str(e)
         )
 
-    # Шаг 2: получаем список игроков (с challenge key, если указан)
     player_list = []
     try:
         # Пробуем с key если он есть, иначе без challenge
@@ -313,12 +268,10 @@ async def query_server(server_cfg: dict) -> ServerStatus:
         raw_players = await _query_udp(ip, port, b"c", challenge=challenge, timeout=4.0)
         player_list = _parse_players_response(raw_players)
     except socket.timeout:
-        # Сервер может не отвечать на запрос игроков — это нормально
         logger.warning(f"timeout при запросе игроков с {ip}:{port}")
     except Exception as e:
         logger.warning(f"ошибка при запросе игроков с {ip}:{port}: {e}")
 
-    # Поле 'version' отсутствует в базовом ответе 'i', но можно получить через 'r' (rules)
     version = "unknown"
     try:
         raw_rules = await _query_udp(ip, port, b"r", challenge=challenge if key else None, timeout=4.0)
@@ -342,16 +295,6 @@ async def query_server(server_cfg: dict) -> ServerStatus:
     )
 
 def _parse_version_from_rules(data: bytes) -> str:
-    """
-    Парсит ответ 'r' (rules), ищет ключ 'version' или 'artime'.
-    Формат: после 11-байт заголовка:
-      - rules_count: 2 байта
-      - для каждого правила:
-          - key_len: 1 байт
-          - key: key_len байт
-          - value_len: 1 байт
-          - value: value_len байт
-    """
     pos = 11
     if len(data) < pos + 2:
         return "unknown"
@@ -383,24 +326,13 @@ def _parse_version_from_rules(data: bytes) -> str:
 
     return "unknown"
 
-# ============================================================
-# Endpoints
-# ============================================================
-
 @app.get("/", tags=["Status"])
 async def root():
     servers = _load_servers()
     return {
-        "api": "Black Russia CRMP Test Servers Tracker",
+        "api": "brtracker",
         "version": "1.2.0",
         "servers_count": len(servers),
-        "servers": [{"name": s["name"], "ip": s["ip"], "port": s["port"], "id": s.get("id")} for s in servers],
-        "endpoints": {
-            "/servers": "Статус всех тестовых серверов",
-            "/server/{name}": "Статус по имени",
-            "/server/id/{id}": "Статус по ID",
-            "/total": "Сводка по всем серверам",
-        },
     }
 
 @app.get("/servers", response_model=AllServersResponse, tags=["Servers"])
@@ -463,7 +395,6 @@ async def get_total():
 
 @app.get("/api/gameservers", response_model=list[GameServerResponse], tags=["Servers"])
 async def get_gameservers():
-    """Получить список игровых серверов в формате для фронтенда с реальным онлайном."""
     servers = _load_servers()
     tasks = [query_server(s) for s in servers]
     results = await asyncio.gather(*tasks)
@@ -480,26 +411,11 @@ async def get_gameservers():
         for server_cfg, status in zip(servers, results)
     ]
 
-@app.post("/reload", tags=["Admin"])
-async def reload_config():
-    """Перезагрузить список серверов без перезапуска сервера."""
-    try:
-        _load_servers()
-        _cache.clear()
-        _cache_ts.clear()
-        return {"status": "ok", "message": "Конфиг перезагружен"}
-    except Exception as e:
-        raise HTTPException(500, f"Ошибка: {e}")
-
-# ============================================================
-# Пуск
-# ============================================================
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "server:app",
-        host="=127.0.0.1",
+        host="0.0.0.0",
         port=8000,
         log_level="info",
     )
