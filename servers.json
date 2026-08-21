@@ -3,7 +3,7 @@
     "logo": "white",
     "color": "AAAAAA",
     "id": 203,
-    "name": "Test P4 (PreProd / ST)",
+    "name": "CBT-1",
     "ip": "80.66.82.19",
     "port": 7040,
     "key": 1424,
@@ -12,11 +12,11 @@
     "status": "test-public",
     "x2": false
   },
-    {
+  {
     "logo": "white",
     "color": "AAAAAA",
     "id": 202,
-    "name": "Test P3 (PreProd / ST)",
+    "name": "CBT-2",
     "ip": "80.66.82.19",
     "port": 7030,
     "key": 1424,
